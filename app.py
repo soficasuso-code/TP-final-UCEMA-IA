@@ -327,7 +327,7 @@ with tab1:
             try:
                 import google.generativeai as genai
                 genai.configure(api_key=api_key)
-                model = genai.GenerativeModel("gemini-1.5-flash")
+                model = genai.GenerativeModel("gemini-pro")
                 prompt = f"""
                 Actuá como un Asesor Financiero Senior de Banca Privada en Argentina.
                 Redactá un Investment Memo ejecutivo, claro y profesional para el cliente '{cliente_nombre}' (Perfil {perfil_riesgo}).
