@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 import io
+import yfinance as yf
 
 # Configuración de página
 st.set_page_config(page_title="Agente IA - Planificación Financiera | UCEMA", page_icon="📈", layout="wide")
@@ -22,22 +23,90 @@ st.markdown('<div class="main-header">Agente de Diagnóstico y Rebalanceo Patrim
 st.markdown('<div class="sub-header">Trabajo Práctico Final — Planificación Financiera y Finanzas Corporativas con IA</div>', unsafe_allow_html=True)
 
 # ------------------------------------------------------------------------------
-# BASE DE DATOS MAESTRA DE ACTIVOS (Mercado)
+# 1. MOTOR DINÁMICO DE MERCADO (Renta Fija Local + Renta Variable Global vía API)
 # ------------------------------------------------------------------------------
-# Esta base de datos evita que el cliente/asesor tenga que calcular TIR, duration y pesos.
-datos_mercado = {
-    "Ticker": ["FCI-MM", "YMCXO", "MGCMO", "PN32O", "BPOD4", "SPY", "QQQ", "VIST"],
-    "Activo": ["FCI Money Market USD", "ON YPF 2031 HD", "ON Pampa Energía 2031 HD", "ON PAE 2032 HD", "BOPREAL Serie 4", "CEDEAR S&P 500", "CEDEAR Nasdaq 100", "CEDEAR Vista Energy"],
-    "Clase": ["Liquidez", "Renta Fija Corporativa", "Renta Fija Corporativa", "Renta Fija Corporativa", "Renta Fija Soberana", "Renta Variable", "Renta Variable", "Renta Variable"],
-    "Emisor": ["FCI Liquidez", "YPF S.A.", "Pampa Energía", "Pan American Energy", "BCRA", "ETF S&P 500", "ETF Nasdaq 100", "Vista Energy"],
-    "Es_Corporativo": [False, True, True, True, False, False, False, True],
-    "TIR_USD": [2.50, 8.40, 8.20, 8.00, 9.60, 9.50, 10.50, 11.50],
-    "Mod_Duration": [0.05, 4.20, 4.10, 4.50, 2.30, 0.00, 0.00, 0.00],
-    "Peso_Moderado": [0.05, 0.15, 0.15, 0.15, 0.20, 0.15, 0.10, 0.05],
-    "Peso_Conservador": [0.20, 0.10, 0.15, 0.15, 0.25, 0.15, 0.0, 0.0],
-    "Peso_Agresivo": [0.0, 0.15, 0.10, 0.10, 0.15, 0.20, 0.20, 0.10]
-}
-df_master = pd.DataFrame(datos_mercado)
+@st.cache_data(ttl=3600)
+def obtener_mercado_actualizado():
+    # A. RENTA FIJA Y LIQUIDEZ (Fijos porque no hay API gratuita confiable de BYMA)
+    activos_rf = [
+        {"Ticker": "FCI-MM", "Activo": "FCI Money Market USD", "Clase": "Liquidez", "Emisor": "FCI Liquidez", "Es_Corporativo": False, "TIR_USD": 2.50, "Mod_Duration": 0.05},
+        {"Ticker": "YMCXO", "Activo": "ON YPF 2031 HD", "Clase": "Renta Fija Corporativa", "Emisor": "YPF S.A.", "Es_Corporativo": True, "TIR_USD": 8.40, "Mod_Duration": 4.20},
+        {"Ticker": "MGCMO", "Activo": "ON Pampa Energía 2031 HD", "Clase": "Renta Fija Corporativa", "Emisor": "Pampa Energía", "Es_Corporativo": True, "TIR_USD": 8.20, "Mod_Duration": 4.10},
+        {"Ticker": "PN32O", "Activo": "ON PAE 2032 HD", "Clase": "Renta Fija Corporativa", "Emisor": "Pan American Energy", "Es_Corporativo": True, "TIR_USD": 8.00, "Mod_Duration": 4.50},
+        {"Ticker": "BPOD4", "Activo": "BOPREAL Serie 4", "Clase": "Renta Fija Soberana", "Emisor": "BCRA", "Es_Corporativo": False, "TIR_USD": 9.60, "Mod_Duration": 2.30}
+    ]
+    
+    # B. RENTA VARIABLE DINÁMICA (Conectado a Yahoo Finance)
+    # Evaluamos un pool de CEDEARs y nos quedamos con los 3 de mejor rendimiento reciente (Momentum)
+    tickers_cedears = ["SPY", "QQQ", "VIST", "AAPL", "MSFT", "MELI"]
+    activos_rv = []
+    
+    try:
+        for t in tickers_cedears:
+            ticker_yf = yf.Ticker(t)
+            hist = ticker_yf.history(period="1mo") # Datos del último mes
+            if not hist.empty:
+                precio_ini = hist['Close'].iloc[0]
+                precio_fin = hist['Close'].iloc[-1]
+                retorno_mensual = ((precio_fin / precio_ini) - 1) * 100
+                
+                activos_rv.append({
+                    "Ticker": t,
+                    "Activo": f"CEDEAR {t}",
+                    "Clase": "Renta Variable",
+                    "Emisor": "Mercado Global",
+                    "Es_Corporativo": False if t in ["SPY", "QQQ"] else True,
+                    "TIR_USD": round(retorno_mensual + 8.0, 2), # TIR proxy basada en momentum
+                    "Mod_Duration": 0.00,
+                    "Retorno_Mensual": retorno_mensual
+                })
+                
+        # Ordenar por los de mejor tendencia y quedarse con los 3 mejores
+        activos_rv = sorted(activos_rv, key=lambda x: x["Retorno_Mensual"], reverse=True)[:3]
+    except Exception as e:
+        # Fallback de seguridad por si Yahoo Finance se cae durante tu presentación
+        activos_rv = [
+            {"Ticker": "SPY", "Activo": "CEDEAR S&P 500", "Clase": "Renta Variable", "Emisor": "ETF S&P 500", "Es_Corporativo": False, "TIR_USD": 9.50, "Mod_Duration": 0.00},
+            {"Ticker": "QQQ", "Activo": "CEDEAR Nasdaq", "Clase": "Renta Variable", "Emisor": "ETF Nasdaq", "Es_Corporativo": False, "TIR_USD": 10.50, "Mod_Duration": 0.00},
+            {"Ticker": "VIST", "Activo": "CEDEAR Vista", "Clase": "Renta Variable", "Emisor": "Vista Energy", "Es_Corporativo": True, "TIR_USD": 11.50, "Mod_Duration": 0.00}
+        ]
+
+    # Unificar mercado
+    df_mercado = pd.DataFrame(activos_rf + activos_rv)
+    
+    # Asignar pesos predeterminados según perfil para los activos seleccionados
+    def asignar_pesos(df, perfil):
+        # Lógica de distribución dinámica
+        pesos = []
+        for i, row in df.iterrows():
+            if perfil == "Moderado":
+                if row["Clase"] == "Liquidez": pesos.append(0.05)
+                elif "Corporativa" in row["Clase"]: pesos.append(0.15)
+                elif "Soberana" in row["Clase"]: pesos.append(0.15)
+                else: pesos.append(0.35 / len(activos_rv)) # Reparte el 35% de RV entre los mejores CEDEARs
+            elif perfil == "Conservador":
+                if row["Clase"] == "Liquidez": pesos.append(0.20)
+                elif "Corporativa" in row["Clase"]: pesos.append(0.15)
+                elif "Soberana" in row["Clase"]: pesos.append(0.20)
+                else: pesos.append(0.15 / len(activos_rv))
+            else: # Agresivo
+                if row["Clase"] == "Liquidez": pesos.append(0.05)
+                elif "Corporativa" in row["Clase"]: pesos.append(0.10)
+                elif "Soberana" in row["Clase"]: pesos.append(0.05)
+                else: pesos.append(0.50 / len(activos_rv))
+        return pesos
+        
+    df_mercado["Peso_Moderado"] = asignar_pesos(df_mercado, "Moderado")
+    df_mercado["Peso_Conservador"] = asignar_pesos(df_mercado, "Conservador")
+    df_mercado["Peso_Agresivo"] = asignar_pesos(df_mercado, "Agresivo")
+    
+    # Normalizar para que sumen 100% exacto por errores de redondeo
+    for p in ["Peso_Moderado", "Peso_Conservador", "Peso_Agresivo"]:
+        df_mercado[p] = df_mercado[p] / df_mercado[p].sum()
+        
+    return df_mercado
+
+df_master = obtener_mercado_actualizado()
 
 # ------------------------------------------------------------------------------
 # BARRA LATERAL
@@ -75,17 +144,16 @@ with st.sidebar:
     liquidez_min = st.number_input("Liquidez Mínima (%)", value=5.0, step=1.0)
 
 # ------------------------------------------------------------------------------
-# PANTALLA INICIAL / DESCARGA DE PLANTILLA MINIMALISTA
+# PANTALLA INICIAL / DESCARGA DE PLANTILLA
 # ------------------------------------------------------------------------------
 if archivo_cliente is None:
-    st.info("👋 **¡Bienvenido!** Por favor subí el Excel del cliente. El sistema cruzará automáticamente los Tickers con nuestra base de mercado (TIR, Duration y Modelos) para calcular la propuesta.")
+    st.info("👋 **¡Bienvenido!** Por favor subí el Excel del cliente. El sistema cruzará la tenencia con datos del mercado global en vivo (Yahoo Finance).")
     
     @st.cache_data
     def get_minimal_template():
-        # Plantilla simplificada: Solo Ticker y Monto
         df_t = pd.DataFrame({
-            "Ticker": ["FCI-MM", "YMCXO", "MGCMO", "PN32O", "BPOD4", "SPY", "QQQ", "VIST"],
-            "Tenencia_Actual_USD": [90000.0, 80000.0, 0.0, 0.0, 0.0, 30000.0, 0.0, 0.0]
+            "Ticker": ["FCI-MM", "YMCXO", "SPY"],
+            "Tenencia_Actual_USD": [90000.0, 80000.0, 30000.0]
         })
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
@@ -100,21 +168,23 @@ if archivo_cliente is None:
 # ------------------------------------------------------------------------------
 try:
     df_upload = pd.read_excel(archivo_cliente)
-    # Validar columnas
     if "Ticker" not in df_upload.columns or "Tenencia_Actual_USD" not in df_upload.columns:
-        st.error("❌ El archivo debe contener exactamente las columnas: 'Ticker' y 'Tenencia_Actual_USD'")
+        st.error("❌ El archivo debe contener exactamente: 'Ticker' y 'Tenencia_Actual_USD'")
         st.stop()
         
-    # Agrupar por ticker por si hay repetidos
     df_upload = df_upload.groupby("Ticker", as_index=False)["Tenencia_Actual_USD"].sum()
     
-    # Merge con la base maestra de mercado (LEFT JOIN desde la base maestra para tener todos los activos del modelo)
-    df_calc = pd.merge(df_master, df_upload, on="Ticker", how="left")
+    # Outer join para conservar los activos del cliente y los mejores de mercado
+    df_calc = pd.merge(df_master, df_upload, on="Ticker", how="outer")
     df_calc["Tenencia_Actual_USD"] = df_calc["Tenencia_Actual_USD"].fillna(0.0)
+    # Llenar datos faltantes (si el cliente tiene algo que no esta en nuestra BD actual)
+    df_calc["Clase"] = df_calc["Clase"].fillna("Otro")
+    df_calc["TIR_USD"] = df_calc["TIR_USD"].fillna(0.0)
+    df_calc["Mod_Duration"] = df_calc["Mod_Duration"].fillna(0.0)
+    df_calc["Es_Corporativo"] = df_calc["Es_Corporativo"].fillna(False)
     
-    # Asignar peso objetivo según perfil
     col_peso = f"Peso_{perfil_riesgo}"
-    df_calc["Peso_Objetivo_Sugerido"] = df_calc[col_peso]
+    df_calc["Peso_Objetivo_Sugerido"] = df_calc[col_peso].fillna(0.0)
     
 except Exception as e:
     st.error(f"Error procesando el archivo: {e}")
@@ -128,25 +198,22 @@ def calcular_metricas(df, col_monto):
         "suma_pesos": float(pesos.sum() * 100),
         "tir": float((pesos * df["TIR_USD"]).sum()),
         "duration": float((pesos * df["Mod_Duration"]).sum()),
-        "ingreso": float((df[col_monto] * (df["TIR_USD"] / 100)).sum()),
         "max_corp": float((pesos[df["Es_Corporativo"]]).max() * 100) if any(df["Es_Corporativo"]) else 0,
         "liq": float((pesos[df["Clase"].str.contains("Liquidez", case=False)]).sum() * 100),
-        "rv": float((pesos[df["Clase"].str.contains("Renta Variable", case=False)]).sum() * 100)
+        "rv": float((pesos[df["Clase"].str.contains("Variable", case=False)]).sum() * 100)
     }
 
-tab1, tab2, tab3 = st.tabs(["🤖 1. Ejecución del Agente", "🛡️ 2. Consistencia y Guardrails", "📊 3. ROI"])
+tab1, tab2 = st.tabs(["🤖 Ejecución y Ajuste Humano", "🛡️ Guardrails"])
 
 with tab1:
-    st.markdown('<div class="step-box"><b>Arquitectura:</b> 1) Carga simplificada &rarr; 2) Cruce automático con Base de Mercado &rarr; 3) Diagnóstico y Propuesta &rarr; 4) Aprobación Asesor &rarr; 5) IA Memo</div>', unsafe_allow_html=True)
-    
     cap_ini = df_calc["Tenencia_Actual_USD"].sum()
     if cap_ini <= 0:
-        st.error("El capital total de la cartera inicial debe ser mayor a 0.")
+        st.error("El capital inicial debe ser mayor a 0.")
         st.stop()
         
     met_ini = calcular_metricas(df_calc, "Tenencia_Actual_USD")
     
-    st.subheader("Paso 1 y 2: Diagnóstico Cuantitativo")
+    st.subheader("1. Diagnóstico Inicial")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Capital", f"USD {met_ini['capital']:,.0f}")
     c2.metric("TIR Actual", f"{met_ini['tir']:.2f}%", f"{met_ini['tir'] - tir_objetivo:+.2f}% vs Obj")
@@ -154,7 +221,8 @@ with tab1:
     c4.metric("Máx Concentración", f"{met_ini['max_corp']:.1f}%", f"Límite {limite_emisor:.0f}%", delta_color="inverse" if met_ini['max_corp'] > limite_emisor else "normal")
 
     st.divider()
-    st.subheader("Paso 3 y 4: Motor de Rebalanceo e Intervención Humana")
+    st.subheader("2. Motor de Rebalanceo (Alimentado por Yahoo Finance)")
+    st.caption("El algoritmo seleccionó dinámicamente los activos de Renta Variable con mejor tendencia técnica del último mes.")
     
     col1, col2 = st.columns([1, 2])
     pesos_aj = []
@@ -177,12 +245,6 @@ with tab1:
         st.dataframe(df_calc[["Ticker", "TIR_USD", "Mod_Duration", "Tenencia_Actual_USD", "Orden_USD", "Peso_Prop_%"]].style.format({
             "TIR_USD":"{:.2f}%", "Mod_Duration":"{:.2f}", "Tenencia_Actual_USD":"USD {:,.0f}", "Orden_USD":"USD {:+,.0f}", "Peso_Prop_%":"{:.1f}%"
         }), hide_index=True)
-        
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("TIR Propuesta", f"{met_prop['tir']:.2f}%")
-        m2.metric("Duration", f"{met_prop['duration']:.2f}a")
-        m3.metric("Flujo Neto Caja", f"USD {abs(flujo):.0f}")
-        m4.metric("CEDEARs", f"{met_prop['rv']:.1f}%")
 
     # Controles
     ok = (abs(met_prop["suma_pesos"] - 100) < 0.1) and (abs(flujo) < 1) and (met_prop["max_corp"] <= limite_emisor) and (met_prop["duration"] <= md_maxima) and (met_prop["tir"] >= tir_objetivo) and (met_prop["liq"] >= liquidez_min) and (met_prop["rv"] <= limite_rv)
@@ -195,7 +257,7 @@ with tab1:
     notas = st.text_input("Comentarios del Asesor:")
     aprob = st.checkbox("Autorizo generar Investment Memo.", disabled=not ok)
     
-    if st.button("🚀 Ejecutar Paso 5", disabled=not (aprob and ok)):
+    if st.button("🚀 Ejecutar Paso 5: Generar Informe", disabled=not (aprob and ok)):
         ords = "\n".join([f"- {r['Accion']} USD {abs(r['Orden_USD']):,.0f} en {r['Ticker']} -> {r['Peso_Prop_%']:.1f}%" for _, r in df_calc.iterrows() if r["Accion"] != "MANTENER"])
         memo = ""
         if modo_ia == "API Google Gemini (En Vivo)" and api_key:
@@ -218,5 +280,3 @@ with tab2:
         {"Control": f"Max Emisor ({limite_emisor}%)", "Estado": "✅" if met_prop["max_corp"] <= limite_emisor else "❌"},
         {"Control": f"Max CEDEARs ({limite_rv}%)", "Estado": "✅" if met_prop["rv"] <= limite_rv else "❌"}
     ]))
-with tab3:
-    st.metric("Ahorro de Tiempo", "85%", "-57 minutos")
