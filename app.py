@@ -5,13 +5,9 @@ from datetime import datetime
 import io
 
 # Configuración de página
-st.set_page_config(
-    page_title="Agente IA - Planificación Financiera | UCEMA",
-    page_icon="📈",
-    layout="wide"
-)
+st.set_page_config(page_title="Agente IA - Planificación Financiera | UCEMA", page_icon="📈", layout="wide")
 
-# Estilos visuales personalizados
+# Estilos visuales
 st.markdown("""
 <style>
     .main-header {font-size: 2rem; font-weight: 700; color: #1B365D; margin-bottom: 0.2rem;}
@@ -26,19 +22,34 @@ st.markdown('<div class="main-header">Agente de Diagnóstico y Rebalanceo Patrim
 st.markdown('<div class="sub-header">Trabajo Práctico Final — Planificación Financiera y Finanzas Corporativas con IA</div>', unsafe_allow_html=True)
 
 # ------------------------------------------------------------------------------
-# BARRA LATERAL: CONFIGURACIÓN DEL AGENTE Y CARGA DE EXCEL
+# BASE DE DATOS MAESTRA DE ACTIVOS (Mercado)
+# ------------------------------------------------------------------------------
+# Esta base de datos evita que el cliente/asesor tenga que calcular TIR, duration y pesos.
+datos_mercado = {
+    "Ticker": ["FCI-MM", "YMCXO", "MGCMO", "PN32O", "BPOD4", "SPY", "QQQ", "VIST"],
+    "Activo": ["FCI Money Market USD", "ON YPF 2031 HD", "ON Pampa Energía 2031 HD", "ON PAE 2032 HD", "BOPREAL Serie 4", "CEDEAR S&P 500", "CEDEAR Nasdaq 100", "CEDEAR Vista Energy"],
+    "Clase": ["Liquidez", "Renta Fija Corporativa", "Renta Fija Corporativa", "Renta Fija Corporativa", "Renta Fija Soberana", "Renta Variable", "Renta Variable", "Renta Variable"],
+    "Emisor": ["FCI Liquidez", "YPF S.A.", "Pampa Energía", "Pan American Energy", "BCRA", "ETF S&P 500", "ETF Nasdaq 100", "Vista Energy"],
+    "Es_Corporativo": [False, True, True, True, False, False, False, True],
+    "TIR_USD": [2.50, 8.40, 8.20, 8.00, 9.60, 9.50, 10.50, 11.50],
+    "Mod_Duration": [0.05, 4.20, 4.10, 4.50, 2.30, 0.00, 0.00, 0.00],
+    "Peso_Moderado": [0.05, 0.15, 0.15, 0.15, 0.20, 0.15, 0.10, 0.05],
+    "Peso_Conservador": [0.20, 0.10, 0.15, 0.15, 0.25, 0.15, 0.0, 0.0],
+    "Peso_Agresivo": [0.0, 0.15, 0.10, 0.10, 0.15, 0.20, 0.20, 0.10]
+}
+df_master = pd.DataFrame(datos_mercado)
+
+# ------------------------------------------------------------------------------
+# BARRA LATERAL
 # ------------------------------------------------------------------------------
 with st.sidebar:
     st.header("📂 1. Cargar Cartera Cliente")
-    archivo_cliente = st.file_uploader("Subir tenencia del cliente (.xlsx)", type=["xlsx"])
+    st.caption("Subí un Excel con solo 2 columnas: Ticker y Tenencia_Actual_USD")
+    archivo_cliente = st.file_uploader("Subir posiciones (.xlsx)", type=["xlsx"])
     
     st.divider()
     st.header("⚙️ 2. Configuración del Agente")
-    modo_ia = st.radio(
-        "Motor de Redacción del Agente:",
-        ["Simulación Determinística (Demo en Vivo)", "API Google Gemini (En Vivo)"],
-        help="El modo Simulación garantiza ejecución instantánea sin requerir API Key."
-    )
+    modo_ia = st.radio("Motor de Redacción:", ["Simulación Determinística", "API Google Gemini (En Vivo)"])
     api_key = ""
     if modo_ia == "API Google Gemini (En Vivo)":
         default_key = st.secrets.get("GEMINI_API_KEY", "") if hasattr(st, "secrets") else ""
@@ -49,261 +60,163 @@ with st.sidebar:
     cliente_nombre = st.text_input("Nombre del Cliente", value="Caso Testigo UCEMA")
     perfil_riesgo = st.selectbox("Perfil de Riesgo", ["Moderado", "Conservador", "Agresivo"], index=0)
 
-    # Restricciones duras según perfil
+    # Restricciones
     if perfil_riesgo == "Conservador":
-        tir_min_default, md_max_default, max_emisor_default, max_rv_default = 6.5, 2.5, 15.0, 15.0
+        t_min, md_max, max_emi, max_rv = 6.5, 2.5, 15.0, 15.0
     elif perfil_riesgo == "Moderado":
-        tir_min_default, md_max_default, max_emisor_default, max_rv_default = 8.0, 3.5, 20.0, 35.0
+        t_min, md_max, max_emi, max_rv = 8.0, 3.5, 20.0, 35.0
     else:
-        tir_min_default, md_max_default, max_emisor_default, max_rv_default = 9.0, 5.0, 25.0, 60.0
+        t_min, md_max, max_emi, max_rv = 9.0, 5.0, 25.0, 60.0
 
-    tir_objetivo = st.number_input("TIR / Retorno Mínimo Objetivo (% USD)", value=tir_min_default, step=0.25)
-    md_maxima = st.number_input("Modified Duration Máxima Cartera (Años)", value=md_max_default, step=0.25)
-    limite_emisor = st.number_input("Límite Máximo por Emisor Corp. (%)", value=max_emisor_default, step=1.0)
-    limite_rv = st.number_input("Tope Máximo Renta Variable / CEDEARs (%)", value=max_rv_default, step=5.0)
-    liquidez_min = st.number_input("Liquidez Mínima Requerida (%)", value=5.0, step=1.0)
+    tir_objetivo = st.number_input("TIR / Retorno Mínimo (%)", value=t_min, step=0.25)
+    md_maxima = st.number_input("Duration Máxima (Años)", value=md_max, step=0.25)
+    limite_emisor = st.number_input("Máx. por Emisor Corp. (%)", value=max_emi, step=1.0)
+    limite_rv = st.number_input("Tope Renta Variable (%)", value=max_rv, step=5.0)
+    liquidez_min = st.number_input("Liquidez Mínima (%)", value=5.0, step=1.0)
 
 # ------------------------------------------------------------------------------
-# PANTALLA DE BIENVENIDA SI NO HAY ARCHIVO
+# PANTALLA INICIAL / DESCARGA DE PLANTILLA MINIMALISTA
 # ------------------------------------------------------------------------------
 if archivo_cliente is None:
-    st.info("👋 **¡Bienvenido a la plataforma!** Para comenzar, por favor subí el archivo Excel con la cartera del cliente desde la barra lateral izquierda.")
-    st.write("Si no tenés un archivo a mano para la demostración, podés descargar la plantilla de caso de prueba acá abajo, modificar los montos si querés, y luego subirla:")
+    st.info("👋 **¡Bienvenido!** Por favor subí el Excel del cliente. El sistema cruzará automáticamente los Tickers con nuestra base de mercado (TIR, Duration y Modelos) para calcular la propuesta.")
     
-    # Generar el archivo excel en memoria para descarga
     @st.cache_data
-    def get_template_excel():
-        data_temp = [
-            {"Ticker": "FCI-MM", "Activo": "FCI Money Market USD", "Clase": "Liquidez", "Emisor": "FCI Liquidez", "Es_Corporativo": False, "TIR_USD": 2.50, "Mod_Duration": 0.05, "Tenencia_Actual_USD": 90000.0, "Peso_Objetivo_Sugerido": 0.05},
-            {"Ticker": "YMCXO", "Activo": "ON YPF 2031 Hard Dollar (Tramo Largo)", "Clase": "Renta Fija Corporativa", "Emisor": "YPF S.A.", "Es_Corporativo": True, "TIR_USD": 8.40, "Mod_Duration": 4.20, "Tenencia_Actual_USD": 80000.0, "Peso_Objetivo_Sugerido": 0.15},
-            {"Ticker": "MGCMO", "Activo": "ON Pampa Energía 2031 HD (Tramo Largo)", "Clase": "Renta Fija Corporativa", "Emisor": "Pampa Energía S.A.", "Es_Corporativo": True, "TIR_USD": 8.20, "Mod_Duration": 4.10, "Tenencia_Actual_USD": 0.0, "Peso_Objetivo_Sugerido": 0.15},
-            {"Ticker": "PN32O", "Activo": "ON Pan American Energy 2032 HD (Tramo Largo)", "Clase": "Renta Fija Corporativa", "Emisor": "Pan American Energy", "Es_Corporativo": True, "TIR_USD": 8.00, "Mod_Duration": 4.50, "Tenencia_Actual_USD": 0.0, "Peso_Objetivo_Sugerido": 0.15},
-            {"Ticker": "BPOD4", "Activo": "BOPREAL Serie 4 (BCRA)", "Clase": "Renta Fija Soberana/BCRA", "Emisor": "BCRA", "Es_Corporativo": False, "TIR_USD": 9.60, "Mod_Duration": 2.30, "Tenencia_Actual_USD": 0.0, "Peso_Objetivo_Sugerido": 0.20},
-            {"Ticker": "SPY", "Activo": "CEDEAR S&P 500 ETF (Core US)", "Clase": "Renta Variable (CEDEAR)", "Emisor": "ETF S&P 500 Diversificado", "Es_Corporativo": False, "TIR_USD": 9.50, "Mod_Duration": 0.00, "Tenencia_Actual_USD": 30000.0, "Peso_Objetivo_Sugerido": 0.15},
-            {"Ticker": "QQQ", "Activo": "CEDEAR Nasdaq 100 ETF (Growth Tech)", "Clase": "Renta Variable (CEDEAR)", "Emisor": "ETF Nasdaq 100", "Es_Corporativo": False, "TIR_USD": 10.50, "Mod_Duration": 0.00, "Tenencia_Actual_USD": 0.0, "Peso_Objetivo_Sugerido": 0.10},
-            {"Ticker": "VIST", "Activo": "CEDEAR Vista Energy (Equity Energía)", "Clase": "Renta Variable (CEDEAR)", "Emisor": "Vista Energy S.A.B.", "Es_Corporativo": True, "TIR_USD": 11.50, "Mod_Duration": 0.00, "Tenencia_Actual_USD": 0.0, "Peso_Objetivo_Sugerido": 0.05}
-        ]
-        df_t = pd.DataFrame(data_temp)
+    def get_minimal_template():
+        # Plantilla simplificada: Solo Ticker y Monto
+        df_t = pd.DataFrame({
+            "Ticker": ["FCI-MM", "YMCXO", "MGCMO", "PN32O", "BPOD4", "SPY", "QQQ", "VIST"],
+            "Tenencia_Actual_USD": [90000.0, 80000.0, 0.0, 0.0, 0.0, 30000.0, 0.0, 0.0]
+        })
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-            df_t.to_excel(writer, index=False, sheet_name="Cartera")
+            df_t.to_excel(writer, index=False, sheet_name="Posiciones")
         return output.getvalue()
     
-    st.download_button(
-        label="📥 Descargar Plantilla Excel de Ejemplo",
-        data=get_template_excel(),
-        file_name="Cartera_Inicial_Cliente.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+    st.download_button("📥 Descargar Plantilla Simple de Excel", data=get_minimal_template(), file_name="Cartera_Simple.xlsx")
     st.stop()
 
 # ------------------------------------------------------------------------------
-# LECTURA DE DATOS DESDE EL EXCEL SUBIDO
+# PROCESAMIENTO INTELIGENTE DEL EXCEL
 # ------------------------------------------------------------------------------
 try:
-    df_base = pd.read_excel(archivo_cliente)
-    # Rellenar nulos
-    df_base.fillna({'Tenencia_Actual_USD': 0.0, 'Peso_Objetivo_Sugerido': 0.0}, inplace=True)
+    df_upload = pd.read_excel(archivo_cliente)
+    # Validar columnas
+    if "Ticker" not in df_upload.columns or "Tenencia_Actual_USD" not in df_upload.columns:
+        st.error("❌ El archivo debe contener exactamente las columnas: 'Ticker' y 'Tenencia_Actual_USD'")
+        st.stop()
+        
+    # Agrupar por ticker por si hay repetidos
+    df_upload = df_upload.groupby("Ticker", as_index=False)["Tenencia_Actual_USD"].sum()
+    
+    # Merge con la base maestra de mercado (LEFT JOIN desde la base maestra para tener todos los activos del modelo)
+    df_calc = pd.merge(df_master, df_upload, on="Ticker", how="left")
+    df_calc["Tenencia_Actual_USD"] = df_calc["Tenencia_Actual_USD"].fillna(0.0)
+    
+    # Asignar peso objetivo según perfil
+    col_peso = f"Peso_{perfil_riesgo}"
+    df_calc["Peso_Objetivo_Sugerido"] = df_calc[col_peso]
+    
 except Exception as e:
-    st.error(f"Error al leer el archivo Excel. Asegurate de usar el formato correcto. Detalle: {e}")
+    st.error(f"Error procesando el archivo: {e}")
     st.stop()
 
-# ------------------------------------------------------------------------------
-# HERRAMIENTA 1 Y 2 DEL AGENTE: MOTOR FINANCIERO DETERMINÍSTICO
-# ------------------------------------------------------------------------------
-def calcular_metricas_cartera(df, col_monto):
-    total_usd = df[col_monto].sum()
-    pesos = df[col_monto] / total_usd if total_usd > 0 else 0
-    tir_pond = float((pesos * df["TIR_USD"]).sum())
-    md_pond = float((pesos * df["Mod_Duration"]).sum())
-    ingreso_anual = float((df[col_monto] * (df["TIR_USD"] / 100.0)).sum())
-    max_corp_peso = float((pesos[df["Es_Corporativo"]]).max() * 100.0) if any(df["Es_Corporativo"]) else 0.0
-    liq_peso = float((pesos[df["Clase"].astype(str).str.contains("Liquidez", case=False)]).sum() * 100.0)
-    rv_peso = float((pesos[df["Clase"].astype(str).str.contains("Renta Variable", case=False)]).sum() * 100.0)
+def calcular_metricas(df, col_monto):
+    total = df[col_monto].sum()
+    pesos = df[col_monto] / total if total > 0 else 0
     return {
-        "capital_total": total_usd,
-        "suma_pesos_pct": float(pesos.sum() * 100.0),
-        "tir_ponderada": tir_pond,
-        "md_ponderada": md_pond,
-        "ingreso_anual_usd": ingreso_anual,
-        "max_emisor_corp_pct": max_corp_peso,
-        "liquidez_pct": liq_peso,
-        "renta_variable_pct": rv_peso
+        "capital": total,
+        "suma_pesos": float(pesos.sum() * 100),
+        "tir": float((pesos * df["TIR_USD"]).sum()),
+        "duration": float((pesos * df["Mod_Duration"]).sum()),
+        "ingreso": float((df[col_monto] * (df["TIR_USD"] / 100)).sum()),
+        "max_corp": float((pesos[df["Es_Corporativo"]]).max() * 100) if any(df["Es_Corporativo"]) else 0,
+        "liq": float((pesos[df["Clase"].str.contains("Liquidez", case=False)]).sum() * 100),
+        "rv": float((pesos[df["Clase"].str.contains("Renta Variable", case=False)]).sum() * 100)
     }
 
-tab1, tab2, tab3 = st.tabs([
-    "🤖 1. Ejecución del Agente y Supervisión Humana",
-    "🛡️ 2. Verificación de Consistencia y Guardrails",
-    "📊 3. Caso de Negocio, ROI y Valor Adicional"
-])
+tab1, tab2, tab3 = st.tabs(["🤖 1. Ejecución del Agente", "🛡️ 2. Consistencia y Guardrails", "📊 3. ROI"])
 
 with tab1:
-    st.markdown("""
-    <div class="step-box">
-        <b>Arquitectura del Proceso:</b> 1) Carga de tenencia Excel &rarr; 2) Diagnóstico cuantitativo (Herramienta 1) &rarr;
-        3) Optimización de órdenes de rebalanceo (Herramienta 2) &rarr; <b>4) Intervención y validación del Asesor</b> &rarr;
-        5) Redacción del Investment Memo por el Agente.
-    </div>
-    """, unsafe_allow_html=True)
-
-    # PASO 1 y 2: Diagnóstico
-    st.subheader("Paso 1 y 2: Diagnóstico Cuantitativo de la Cartera Inicial")
-    df_calc = df_base.copy()
-    cap_inicial = df_calc["Tenencia_Actual_USD"].sum()
-    df_calc["Peso_Actual_%"] = (df_calc["Tenencia_Actual_USD"] / cap_inicial) * 100.0 if cap_inicial > 0 else 0
-    metricas_ini = calcular_metricas_cartera(df_calc, "Tenencia_Actual_USD")
-
+    st.markdown('<div class="step-box"><b>Arquitectura:</b> 1) Carga simplificada &rarr; 2) Cruce automático con Base de Mercado &rarr; 3) Diagnóstico y Propuesta &rarr; 4) Aprobación Asesor &rarr; 5) IA Memo</div>', unsafe_allow_html=True)
+    
+    cap_ini = df_calc["Tenencia_Actual_USD"].sum()
+    if cap_ini <= 0:
+        st.error("El capital total de la cartera inicial debe ser mayor a 0.")
+        st.stop()
+        
+    met_ini = calcular_metricas(df_calc, "Tenencia_Actual_USD")
+    
+    st.subheader("Paso 1 y 2: Diagnóstico Cuantitativo")
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Capital Total en Custodia", f"USD {metricas_ini['capital_total']:,.0f}")
-    c2.metric("TIR / Retorno Esp. Actual", f"{metricas_ini['tir_ponderada']:.2f}%", delta=f"{metricas_ini['tir_ponderada'] - tir_objetivo:+.2f}% vs Objetivo ({tir_objetivo:.1f}%)")
-    c3.metric("Modified Duration Actual", f"{metricas_ini['md_ponderada']:.2f} años", delta=f"Peso CEDEARs actual: {metricas_ini['renta_variable_pct']:.0f}%", delta_color="off")
-    c4.metric("Máx. Concentración Corporativa", f"{metricas_ini['max_emisor_corp_pct']:.1f}%", delta=f"Límite {limite_emisor:.0f}%", delta_color="inverse" if metricas_ini['max_emisor_corp_pct'] > limite_emisor else "normal")
-
-    if metricas_ini["max_emisor_corp_pct"] > limite_emisor or metricas_ini["tir_ponderada"] < tir_objetivo:
-        st.markdown(f"""
-        <div class="guardrail-warn">
-            <b>⚠️ Hallazgos del Diagnóstico Automático (Perfil {perfil_riesgo}):</b><br>
-            • La cartera actual presenta desvíos respecto a su política de inversión (exceso de concentración o sub-optimización de rendimiento).
-        </div>
-        """, unsafe_allow_html=True)
+    c1.metric("Capital", f"USD {met_ini['capital']:,.0f}")
+    c2.metric("TIR Actual", f"{met_ini['tir']:.2f}%", f"{met_ini['tir'] - tir_objetivo:+.2f}% vs Obj")
+    c3.metric("Duration", f"{met_ini['duration']:.2f}a", f"RV: {met_ini['rv']:.0f}%", delta_color="off")
+    c4.metric("Máx Concentración", f"{met_ini['max_corp']:.1f}%", f"Límite {limite_emisor:.0f}%", delta_color="inverse" if met_ini['max_corp'] > limite_emisor else "normal")
 
     st.divider()
-
-    st.subheader("Paso 3 y 4: Propuesta del Motor e Intervención Humana (Human-in-the-Loop)")
-    st.info("👨‍💼 **Instancia de Supervisión del Asesor:** Ajustá las ponderaciones desde los controles. El Agente sólo redactará el informe si los números verifican todas las reglas financieras.")
-
-    col_sliders, col_tabla = st.columns([1, 2])
-    pesos_ajustados = []
-    with col_sliders:
-        st.markdown("**Ajuste Dinámico de Ponderaciones (%)**")
-        for idx, row in df_calc.iterrows():
-            val_pct = st.slider(
-                f"{row['Ticker']} ({row['Activo']})",
-                min_value=0.0,
-                max_value=100.0,
-                value=float(row["Peso_Objetivo_Sugerido"] * 100.0),
-                step=1.0,
-                key=f"slider_{row['Ticker']}"
-            )
-            pesos_ajustados.append(val_pct / 100.0)
-
-    df_calc["Peso_Propuesto_%"] = [p * 100.0 for p in pesos_ajustados]
-    df_calc["Tenencia_Propuesta_USD"] = df_calc["Peso_Propuesto_%"] / 100.0 * cap_inicial
-    df_calc["Orden_Rebalanceo_USD"] = df_calc["Tenencia_Propuesta_USD"] - df_calc["Tenencia_Actual_USD"]
-    df_calc["Accion"] = df_calc["Orden_Rebalanceo_USD"].apply(
-        lambda x: "COMPRAR" if x > 1e-2 else ("VENDER" if x < -1e-2 else "MANTENER")
-    )
-
-    metricas_prop = calcular_metricas_cartera(df_calc, "Tenencia_Propuesta_USD")
-    flujo_neto_caja = float(df_calc["Orden_Rebalanceo_USD"].sum())
-
-    with col_tabla:
-        st.markdown("**Cuadro de Órdenes Calculadas**")
-        df_vista = df_calc[[
-            "Ticker", "Activo", "TIR_USD", "Mod_Duration",
-            "Tenencia_Actual_USD", "Orden_Rebalanceo_USD", "Peso_Propuesto_%"
-        ]].copy()
-        st.dataframe(
-            df_vista.style.format({
-                "TIR_USD": "{:.2f}%", "Mod_Duration": "{:.2f}",
-                "Tenencia_Actual_USD": "USD {:,.0f}", "Orden_Rebalanceo_USD": "USD {:+,.0f}",
-                "Peso_Propuesto_%": "{:.1f}%"
-            }),
-            use_container_width=True, hide_index=True
-        )
-
+    st.subheader("Paso 3 y 4: Motor de Rebalanceo e Intervención Humana")
+    
+    col1, col2 = st.columns([1, 2])
+    pesos_aj = []
+    with col1:
+        st.markdown("**Ajuste Dinámico (%)**")
+        for i, r in df_calc.iterrows():
+            val = st.slider(f"{r['Ticker']}", 0.0, 100.0, float(r["Peso_Objetivo_Sugerido"]*100), 1.0)
+            pesos_aj.append(val / 100)
+            
+    df_calc["Peso_Prop_%"] = [p * 100 for p in pesos_aj]
+    df_calc["Tenencia_Prop_USD"] = df_calc["Peso_Prop_%"] / 100 * cap_ini
+    df_calc["Orden_USD"] = df_calc["Tenencia_Prop_USD"] - df_calc["Tenencia_Actual_USD"]
+    df_calc["Accion"] = df_calc["Orden_USD"].apply(lambda x: "COMPRAR" if x>1 else ("VENDER" if x<-1 else "MANTENER"))
+    
+    met_prop = calcular_metricas(df_calc, "Tenencia_Prop_USD")
+    flujo = float(df_calc["Orden_USD"].sum())
+    
+    with col2:
+        st.markdown("**Cuadro de Órdenes y Mercado**")
+        st.dataframe(df_calc[["Ticker", "TIR_USD", "Mod_Duration", "Tenencia_Actual_USD", "Orden_USD", "Peso_Prop_%"]].style.format({
+            "TIR_USD":"{:.2f}%", "Mod_Duration":"{:.2f}", "Tenencia_Actual_USD":"USD {:,.0f}", "Orden_USD":"USD {:+,.0f}", "Peso_Prop_%":"{:.1f}%"
+        }), hide_index=True)
+        
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("TIR / Retorno Propuesto", f"{metricas_prop['tir_ponderada']:.2f}%")
-        m2.metric("Duration Propuesta", f"{metricas_prop['md_ponderada']:.2f} años")
-        m3.metric("Retorno Anual", f"USD {metricas_prop['ingreso_anual_usd']:,.0f}")
-        m4.metric("Exposición CEDEARs", f"{metricas_prop['renta_variable_pct']:.1f}%", delta="En límite" if metricas_prop['renta_variable_pct'] <= limite_rv else "Excedido", delta_color="normal" if metricas_prop['renta_variable_pct'] <= limite_rv else "inverse")
+        m1.metric("TIR Propuesta", f"{met_prop['tir']:.2f}%")
+        m2.metric("Duration", f"{met_prop['duration']:.2f}a")
+        m3.metric("Flujo Neto Caja", f"USD {abs(flujo):.0f}")
+        m4.metric("CEDEARs", f"{met_prop['rv']:.1f}%")
 
-    # VALIDACIÓN DE GUARDRAILS
-    suma_100_ok = abs(metricas_prop["suma_pesos_pct"] - 100.0) < 0.01
-    caja_cero_ok = abs(flujo_neto_caja) < 0.01
-    emisor_ok = metricas_prop["max_emisor_corp_pct"] <= limite_emisor
-    duration_ok = metricas_prop["md_ponderada"] <= md_maxima
-    tir_ok = metricas_prop["tir_ponderada"] >= tir_objetivo
-    liquidez_ok = metricas_prop["liquidez_pct"] >= liquidez_min
-    rv_ok = metricas_prop["renta_variable_pct"] <= limite_rv
-
-    todos_los_controles_ok = suma_100_ok and caja_cero_ok and emisor_ok and duration_ok and tir_ok and liquidez_ok and rv_ok
-
-    if not todos_los_controles_ok:
-        st.error(
-            f"⛔ BLOQUEO DE GUARDRAIL FINANCIERO: La propuesta actual no supera las validaciones duras "
-            f"(Suma de pesos: {metricas_prop['suma_pesos_pct']:.1f}% | Máx Emisor: {metricas_prop['max_emisor_corp_pct']:.1f}% | "
-            f"CEDEARs: {metricas_prop['renta_variable_pct']:.1f}% | TIR: {metricas_prop['tir_ponderada']:.2f}% | Duration: {metricas_prop['md_ponderada']:.2f}a). "
-            f"Ajustá los controles deslizantes para cumplir la política."
-        )
+    # Controles
+    ok = (abs(met_prop["suma_pesos"] - 100) < 0.1) and (abs(flujo) < 1) and (met_prop["max_corp"] <= limite_emisor) and (met_prop["duration"] <= md_maxima) and (met_prop["tir"] >= tir_objetivo) and (met_prop["liq"] >= liquidez_min) and (met_prop["rv"] <= limite_rv)
+    
+    if not ok:
+        st.error(f"⛔ BLOQUEO: Suma {met_prop['suma_pesos']:.1f}% | Máx Emisor {met_prop['max_corp']:.1f}% | RV {met_prop['rv']:.1f}% | TIR {met_prop['tir']:.2f}% | Dur {met_prop['duration']:.2f}")
     else:
-        st.markdown("""
-        <div class="guardrail-ok">
-            <b>✅ Controles de Consistencia Financiera Superados (100%):</b> La cartera cumple todas las normativas del perfil.
-        </div>
-        """, unsafe_allow_html=True)
-
-    st.markdown("### ✍️ Confirmación del Asesor Financiero (Human-in-the-Loop)")
-    notas_asesor = st.text_input("Comentarios del Asesor para el Memo (opcional):", value="Rebalanceo estratégico de cartera.")
-    aprobacion_humana = st.checkbox("He revisado la consistencia financiera de las órdenes y autorizo al Agente a generar el Investment Memo.", disabled=not todos_los_controles_ok)
-
-    if st.button("🚀 Ejecutar Paso 5: Generar Investment Memo con el Agente", type="primary", disabled=not (aprobacion_humana and todos_los_controles_ok)):
-        ordenes_texto = "\n".join([
-            f"- {r['Accion']} USD {abs(r['Orden_Rebalanceo_USD']):,.0f} en {r['Activo']} ({r['Ticker']}) -> Nuevo peso: {r['Peso_Propuesto_%']:.1f}%"
-            for _, r in df_calc.iterrows() if r["Accion"] != "MANTENER"
-        ])
-
-        memo_generado = ""
+        st.success("✅ Controles Superados (100%).")
+        
+    notas = st.text_input("Comentarios del Asesor:")
+    aprob = st.checkbox("Autorizo generar Investment Memo.", disabled=not ok)
+    
+    if st.button("🚀 Ejecutar Paso 5", disabled=not (aprob and ok)):
+        ords = "\n".join([f"- {r['Accion']} USD {abs(r['Orden_USD']):,.0f} en {r['Ticker']} -> {r['Peso_Prop_%']:.1f}%" for _, r in df_calc.iterrows() if r["Accion"] != "MANTENER"])
+        memo = ""
         if modo_ia == "API Google Gemini (En Vivo)" and api_key:
             try:
                 import google.generativeai as genai
                 genai.configure(api_key=api_key)
-                model = genai.GenerativeModel("gemini-pro") # Versión robusta para texto
-                prompt = f"""
-                Actuá como un Asesor Financiero Senior de Banca Privada en Argentina.
-                Redactá un Investment Memo ejecutivo para el cliente '{cliente_nombre}' (Perfil {perfil_riesgo}).
-                Utilizá EXCLUSIVAMENTE estas cifras:
-                - Capital: USD {cap_inicial:,.0f}
-                - Retorno Esperado: de {metricas_ini['tir_ponderada']:.2f}% a {metricas_prop['tir_ponderada']:.2f}%
-                - Duration: de {metricas_ini['md_ponderada']:.2f} años a {metricas_prop['md_ponderada']:.2f} años
-                - Flujo Anual: de USD {metricas_ini['ingreso_anual_usd']:,.0f} a USD {metricas_prop['ingreso_anual_usd']:,.0f}
-                - CEDEARs: {metricas_prop['renta_variable_pct']:.1f}%
-                - Órdenes: {ordenes_texto}
-                - Notas: {notas_asesor}
-                """
-                with st.spinner("Redactando Investment Memo verificado..."):
-                    respuesta = model.generate_content(prompt)
-                    memo_generado = respuesta.text
-            except Exception as e:
-                st.warning(f"Error con la API ({e}). Utilizando motor de respaldo.")
-
-        if not memo_generado:
-            memo_generado = f"""### PROPUESTA DE REBALANCEO PATRIMONIAL
-**Destinatario:** {cliente_nombre} | **Perfil:** {perfil_riesgo}  
-**Fecha:** {datetime.now().strftime('%d/%m/%Y')}
-
-#### 1. Plan de Acción y Órdenes
-Se propone un rebalanceo hacia una TIR ponderada del **{metricas_prop['tir_ponderada']:.2f}%** y una duration de **{metricas_prop['md_ponderada']:.2f} años**.
-{ordenes_texto}
-
-**Notas del Asesor:** {notas_asesor}
-"""
-        st.success("✅ Investment Memo generado con éxito.")
-        st.markdown(memo_generado)
+                model = genai.GenerativeModel("gemini-pro")
+                memo = model.generate_content(f"Sos un Asesor Senior. Redactá un Memo Ejecutivo para '{cliente_nombre}' (Perfil {perfil_riesgo}). Usa: TIR {met_prop['tir']:.2f}%, Duration {met_prop['duration']:.2f}a, CEDEARs {met_prop['rv']:.1f}%. Órdenes: {ords}. Notas: {notas}").text
+            except:
+                st.warning("Fallo API. Usando motor de respaldo.")
+        if not memo:
+            memo = f"### REBALANCEO - {cliente_nombre}\n**TIR:** {met_prop['tir']:.2f}% | **Duration:** {met_prop['duration']:.2f}a\n{ords}\n**Notas:** {notas}"
+        st.info(memo)
 
 with tab2:
-    st.subheader("Auditoría de Guardrails")
     st.table(pd.DataFrame([
-        {"Control": "1. Suma Ponderaciones (100%)", "Estado": "✅ APROBADO" if suma_100_ok else "❌ FALLO"},
-        {"Control": f"2. TIR Mínima ({tir_objetivo}%)", "Estado": "✅ APROBADO" if tir_ok else "❌ FALLO"},
-        {"Control": f"3. Duration Máxima ({md_maxima} a)", "Estado": "✅ APROBADO" if duration_ok else "❌ FALLO"},
-        {"Control": f"4. Max Emisor ({limite_emisor}%)", "Estado": "✅ APROBADO" if emisor_ok else "❌ FALLO"},
-        {"Control": f"5. Max CEDEARs ({limite_rv}%)", "Estado": "✅ APROBADO" if rv_ok else "❌ FALLO"},
+        {"Control": "Suma Ponderaciones", "Estado": "✅" if abs(met_prop["suma_pesos"] - 100) < 0.1 else "❌"},
+        {"Control": f"TIR Mínima ({tir_objetivo}%)", "Estado": "✅" if met_prop["tir"] >= tir_objetivo else "❌"},
+        {"Control": f"Duration Máx ({md_maxima} a)", "Estado": "✅" if met_prop["duration"] <= md_maxima else "❌"},
+        {"Control": f"Max Emisor ({limite_emisor}%)", "Estado": "✅" if met_prop["max_corp"] <= limite_emisor else "❌"},
+        {"Control": f"Max CEDEARs ({limite_rv}%)", "Estado": "✅" if met_prop["rv"] <= limite_rv else "❌"}
     ]))
-
 with tab3:
-    st.subheader("Simulador de ROI del Agente")
-    t_manual, t_ia = st.columns(2)
-    min_manual = t_manual.number_input("Tiempo Manual (min)", value=65)
-    min_ia = t_ia.number_input("Tiempo con Agente (min)", value=8)
-    st.metric("Ahorro Operativo por Propuesta", f"{(min_manual - min_ia) / min_manual * 100:.1f}%", delta=f"-{min_manual - min_ia} min")
+    st.metric("Ahorro de Tiempo", "85%", "-57 minutos")
