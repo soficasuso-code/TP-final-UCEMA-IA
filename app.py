@@ -44,7 +44,7 @@ def obtener_mercado_actualizado():
     try:
         for t in tickers_cedears:
             ticker_yf = yf.Ticker(t)
-            hist = ticker_yf.history(period="1mo") # Datos del último mes
+            hist = ticker_yf.history(period="1y") # Datos del último mes
             if not hist.empty:
                 precio_ini = hist['Close'].iloc[0]
                 precio_fin = hist['Close'].iloc[-1]
